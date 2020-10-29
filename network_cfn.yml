@@ -1,0 +1,195 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: VPC and subnets for web application
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: team1-final-webApp
+
+#https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/gettingstarted.templatebasics.html#gettingstarted.templatebasics.mappings
+Mappings: 
+  NetworkConfig:
+    VPC:
+      CIDR: "172.16.0.0/16"
+    PrivateOne:
+      CIDR: "172.16.0.0/24"
+    PrivateTwo:
+      CIDR: "172.16.1.0/24"
+    PublicOne:
+      CIDR: "172.16.2.0/24"
+    PublicTwo:
+      CIDR: "172.16.3.0/24"
+  RegionMap:
+    us-east-1:
+      AMI: ami-0a8342b1c5da71119 #custom ami with webapp
+    us-west-1:
+      AMI: ami-0e4035ae3f70c400f #Amazon Linux 2 AMI (HVM), SSD Volume Type 64-bit x86
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsSupport: true #https://docs.aws.amazon.com/vpc/latest/userguide/vpc-dns.html
+      EnableDnsHostnames: true
+      CidrBlock: !FindInMap ["NetworkConfig", "VPC", "CIDR"] #https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/intrinsic-function-reference-findinmap.html
+
+  SubnetPublicOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+          - 0
+          - Fn::GetAZs: { Ref: "AWS::Region" }
+      VpcId: !Ref 'VPC'
+      CidrBlock: !FindInMap [NetworkConfig, PublicOne, CIDR]
+      MapPublicIpOnLaunch: true
+  SubnetPublicTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+          - 1
+          - Fn::GetAZs: { Ref: "AWS::Region" }
+      VpcId: !Ref 'VPC'
+      CidrBlock: !FindInMap [NetworkConfig, PublicTwo, CIDR]
+      MapPublicIpOnLaunch: true
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref 'VPC'
+      InternetGatewayId: !Ref 'InternetGateway'
+  
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref 'VPC'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref 'PublicRouteTable'
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref 'InternetGateway'
+
+  PublicSubnetOneRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetPublicOne
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetTwoRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetPublicTwo
+      RouteTableId: !Ref PublicRouteTable
+
+  ec2SG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG for ec2 instances
+      VpcId: !Ref VPC
+      GroupName: ec2-sg
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          SourceSecurityGroupId: !Ref elbSG
+          FromPort: 8080
+          ToPort: 8080
+
+  elbSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG for ELB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+
+
+  EC2One:
+      Type: AWS::EC2::Instance
+      Properties:
+        ImageId: !FindInMap ['RegionMap', !Ref 'AWS::Region', AMI]
+        InstanceType: t3.micro
+        Monitoring: true
+        SecurityGroupIds:
+          - !Ref ec2SG
+        SubnetId: !Ref SubnetPublicOne
+        Tags:
+          - Key: key
+            Value: value
+
+  EC2Two:
+      Type: AWS::EC2::Instance
+      Properties:
+        ImageId: !FindInMap ['RegionMap', !Ref 'AWS::Region', AMI]
+        InstanceType: t3.micro
+        Monitoring: true
+        SecurityGroupIds:
+          - !Ref ec2SG
+        SubnetId: !Ref SubnetPublicTwo
+        Tags:
+          - Key: key
+            Value: value
+
+  PublicELB:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    Properties:
+      IpAddressType: 'ipv4'
+      Scheme: 'internet-facing'
+      SecurityGroups:
+        - !Ref elbSG
+      Subnets:
+        - !Ref SubnetPublicOne
+        - !Ref SubnetPublicTwo
+
+  HTTP80Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ec2TargetGroup
+      LoadBalancerArn: !Ref PublicELB
+      Port: 80
+      Protocol: HTTP
+  
+  ec2TargetGroup:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      TargetType: instance
+      Targets:
+        - Id: !Ref EC2One
+          Port: 8080
+        - Id: !Ref EC2Two
+          Port: 8080
+
+#outputs to be used by other cloudformation templates
+Outputs:
+  VpcId:
+    Description: The ID of the core VPC
+    Value: !Ref 'VPC'
+    Export:
+      Name: !Sub ${EnvironmentName}:VpcId
+  SubnetPublicOne:
+    Description: The ID of private subnet one
+    Value: !Ref "SubnetPublicOne"
+    Export:
+      Name: !Sub ${EnvironmentName}:SubnetPrivateOne
+  SubnetPublicTwo:
+    Description: The ID of private subnet two
+    Value: !Ref "SubnetPublicTwo"
+    Export:
+      Name: !Sub ${EnvironmentName}:SubnetPrivateTwo
+  PublicELB:
+    Description: Elastic Load Balancer DNS
+    Value: !GetAtt PublicELB.DNSName
+    Export:
+      Name: !Sub ${EnvironmentName}:PublicELB
